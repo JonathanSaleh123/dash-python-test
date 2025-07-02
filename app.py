@@ -15,8 +15,8 @@ geolocator = Nominatim(user_agent="geo-dash-app")
 # to avoid repeated network requests and improve performance.
 us_zip_geojson = None
 # URL for a comprehensive US zip code GeoJSON file (26MB resolution)
-ZIP_GEOJSON_URL = "https://raw.githubusercontent.com/ndrezn/zip-code-geojson/master/usa_zip_codes_geo_26m.json"
-
+ZIP_GEOJSON_URL = "https://raw.githubusercontent.com/ndrezn/zip-code-geojson/master/usa_zip_codes_geo_100m.json"
+US_CITY_GEOJSON_URL = "https://github.com/generalpiston/geojson-us-city-boundaries/master/"
 # Function to load the GeoJSON data from the specified URL.
 # This function is called once at the application's startup.
 def load_zip_geojson():
