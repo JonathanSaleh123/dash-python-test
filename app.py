@@ -38,10 +38,10 @@ STATE_ABBREVIATIONS = {
     "Kansas": "KS", "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME", "Maryland": "MD",
     "Massachusetts": "MA", "Michigan": "MI", "Minnesota": "MN", "Mississippi": "MS", "Missouri": "MO",
     "Montana": "MT", "Nebraska": "NE", "Nevada": "NV", "New Hampshire": "NH", "New Jersey": "NJ",
-    "New Mexico": "NM", "New York": "NY", "North Carolina": "NC", "North Dakota": "ND", "Ohio": "OH",
-    "Oklahoma": "OK", "Oregon": "OR", "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC",
-    "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT", "Vermont": "VT",
-    "Virginia": "VA", "Washington": "WA", "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY"
+    "New Mexico": "NM", "New York": "NY", "North Carolina": "NC", "North Dakota": "ND", "OH": "Ohio",
+    "Oklahoma": "OK", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont",
+    "VA": "Virginia", "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming"
 }
 
 # Function to load the US Zip Code GeoJSON data
@@ -85,43 +85,59 @@ def load_specific_city_geojson(state_abbr, city_slug):
         return {"type": "FeatureCollection", "features": []}
 
 # Initialize the Dash application
-app = dash.Dash(__name__)
+app = dash.Dash(__name__,
+                 external_scripts=["https://unpkg.com/@tailwindcss/browser@4"])
 
 # Define the layout
 app.layout = html.Div(
     className="min-h-screen bg-gray-100 p-4 font-inter antialiased flex flex-col items-center",
     children=[
+        # Tailwind CSS and Inter font import
         html.Script(src="https://cdn.tailwindcss.com"),
         html.Link(href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap", rel="stylesheet"),
+
         html.H1(
             "City/Zip Code Map Explorer",
             className="text-4xl font-bold text-gray-800 mb-6 text-center"
         ),
+        # Main content area: Input/Button section and Map section side-by-side
         html.Div(
-            className="bg-white p-6 rounded-lg shadow-lg w-full max-w-md flex flex-col space-y-4",
+            className="flex flex-col lg:flex-row gap-6 w-full max-w-6xl bg-gray-100", # Responsive flex container
             children=[
+                # Input and Button section
                 html.Div(
-                    className="flex flex-col",
+                    className="bg-white p-6 rounded-lg shadow-lg w-full lg:w-1/3 flex-shrink-0 flex flex-col space-y-4",
                     children=[
-                        html.Label("Enter City or Zip Code:", className="text-gray-700 text-lg mb-2"),
-                        dcc.Input(
-                            id="location-input",
-                            type="text",
-                            placeholder="e.g., 90210 or San Francisco, CA",
-                            className="p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        html.Div(
+                            className="flex flex-col",
+                            children=[
+                                html.Label("Enter City or Zip Code:", className="text-gray-700 text-lg mb-2"),
+                                dcc.Input(
+                                    id="location-input",
+                                    type="text",
+                                    placeholder="e.g., 90210 or San Francisco, CA",
+                                    className="p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                ),
+                            ]
+                        ),
+                        html.Button(
+                            "Show on Map",
+                            id="submit-button",
+                            n_clicks=0,
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-md shadow-md transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
                         ),
                     ]
                 ),
-                html.Button(
-                    "Show on Map",
-                    id="submit-button",
-                    n_clicks=0,
-                    className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-md shadow-md transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-                ),
+
+                # Map output section
                 dcc.Loading(
                     id="loading-map",
                     type="circle",
-                    children=html.Div(id="map-output", className="w-full h-[600px] bg-gray-200 rounded-md overflow-hidden")
+                    className="w-full lg:flex-1", # Map container takes remaining space
+                    children=html.Div(
+                        id="map-output",
+                        className="w-full h-[400px] lg:h-[600px] bg-gray-200 rounded-md overflow-hidden shadow-lg" # Adjusted height for smaller map
+                    )
                 )
             ]
         )
@@ -135,9 +151,10 @@ app.layout = html.Div(
 )
 def update_map(n_clicks, location_input):
     if n_clicks == 0 or not location_input:
+        # Initial map view or no input
         return dcc.Graph(
             figure=px.scatter_mapbox(
-                lat=[39.8283], lon=[-98.5795], zoom=3, height=600,
+                lat=[39.8283], lon=[-98.5795], zoom=3, height=600, width=800, # Adjusted height and width for initial view
                 mapbox_style="open-street-map",
                 title="Enter a City or Zip Code to explore the map!"
             ).update_layout(margin={"r":0,"t":50,"l":0,"b":0})
@@ -169,11 +186,13 @@ def update_map(n_clicks, location_input):
                 center_lon = float(filtered_features[0]["properties"]["INTPTLON10"])
                 zoom_level = 10
             else:
+                # Fallback for calculating center if centroid properties are missing
                 coords = filtered_features[0]["geometry"]["coordinates"]
                 if filtered_features[0]["geometry"]["type"] == "Polygon":
                     lons = [c[0] for c in coords[0]]
                     lats = [c[1] for c in coords[0]]
                 elif filtered_features[0]["geometry"]["type"] == "MultiPolygon":
+                    # For MultiPolygon, take the first polygon's coordinates
                     lons = [c[0] for c in coords[0][0]]
                     lats = [c[1] for c in coords[0][0]]
                 center_lon = sum(lons) / len(lons)
@@ -189,7 +208,8 @@ def update_map(n_clicks, location_input):
                 zoom=zoom_level,
                 center={"lat": center_lat, "lon": center_lon},
                 opacity=0.5,
-                height=600,
+                height=600, # Keep graph height consistent for the dcc.Graph component
+                width=800, # Adjust width for better display
                 title=f"Area for Zip Code: {location_input}"
             )
             fig.update_traces(marker_line_width=2, marker_line_color="black")
@@ -246,14 +266,6 @@ def update_map(n_clicks, location_input):
                     # We need one row of data that "matches" the single feature in our GeoJSON
                     city_data_df = pd.DataFrame({'id_col': [city_slug]})
 
-                    # For px.choropleth_mapbox, we need 'locations' to refer to an ID that exists
-                    # within the 'featureidkey' of our GeoJSON.
-                    # The generalpiston GeoJSON files often have a 'NAME' property,
-                    # but since we are loading a single file that *is* the feature,
-                    # we can rely on a dummy 'id' if the geojson is a single feature.
-                    # Let's assume the first feature's 'NAME' property is what we're looking for,
-                    # or if not, use its 'id' or just a dummy string if the geojson is always 1 feature.
-
                     # Let's extract the actual name from the GeoJSON's first feature's properties
                     # to use as the location identifier for Plotly Express
                     feature_name_in_geojson = city_geojson_data["features"][0]["properties"].get("NAME", city_slug)
@@ -269,7 +281,8 @@ def update_map(n_clicks, location_input):
                         zoom=10, # A closer zoom for specific city boundaries
                         center={"lat": center_lat, "lon": center_lon},
                         opacity=0.6,
-                        height=600,
+                        height=600, # Keep graph height consistent for the dcc.Graph component
+                        width=800,
                         title=f"Boundary for City: {location.address}"
                     )
                     fig.update_traces(marker_line_width=2, marker_line_color="black")
@@ -290,7 +303,8 @@ def update_map(n_clicks, location_input):
                         lon=[center_lon],
                         zoom=zoom_level,
                         mapbox_style="open-street-map",
-                        height=600,
+                        height=600, # Keep graph height consistent for the dcc.Graph component,
+                        width=800,
                         title=f"Location for City: {location.address} (Boundary data not found or available)"
                     )
                     fig.update_traces(marker=dict(size=20, opacity=0.7, symbol="circle", color="red"))
