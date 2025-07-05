@@ -1,16 +1,19 @@
 import dash
 from dash import dcc, html, Input, Output, State
 import plotly.express as px
-import plotly.graph_objects as go # Import graph_objects for more control
+import plotly.graph_objects as go
 import json
 import requests
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 import pandas as pd
 import re
+from dash.exceptions import PreventUpdate # Import PreventUpdate
 
 # Initialize Nominatim geolocator
-geolocator = Nominatim(user_agent="geo-dash-app")
+# IMPORTANT: Provide a unique and descriptive user_agent for your application
+# This is crucial for respecting Nominatim's usage policy and avoiding blocks.
+geolocator = Nominatim(user_agent="city_zip_explorer_app_v1.0")
 
 # Global variable to store US zip code GeoJSON data
 us_zip_geojson = None
@@ -38,10 +41,10 @@ STATE_ABBREVIATIONS = {
     "Kansas": "KS", "Kentucky": "KY", "Louisiana": "LA", "Maine": "ME", "Maryland": "MD",
     "Massachusetts": "MA", "Michigan": "MI", "Minnesota": "MN", "Mississippi": "MS", "Missouri": "MO",
     "Montana": "MT", "Nebraska": "NE", "Nevada": "NV", "New Hampshire": "NH", "New Jersey": "NJ",
-    "New Mexico": "NM", "New York": "NY", "North Carolina": "NC", "North Dakota": "ND", "OH": "Ohio",
-    "Oklahoma": "OK", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
-    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont",
-    "VA": "Virginia", "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming"
+    "New Mexico": "NM", "New York": "NY", "North Carolina": "NC", "North Dakota": "ND", "Ohio": "OH",
+    "Oklahoma": "OK", "Oregon": "OR", "Pennsylvania": "PA", "Rhode Island": "RI", "South Carolina": "SC",
+    "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT", "Vermont": "VT",
+    "Virginia": "VA", "Washington": "WA", "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY"
 }
 
 # Function to load the US Zip Code GeoJSON data
@@ -112,20 +115,27 @@ app.layout = html.Div(
                             className="flex flex-col",
                             children=[
                                 html.Label("Enter City or Zip Code:", className="text-gray-700 text-lg mb-2"),
-                                dcc.Input(
-                                    id="location-input",
-                                    type="text",
-                                    placeholder="e.g., 90210 or San Francisco, CA",
-                                    className="p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                # Changed dcc.Input to dcc.Dropdown for autocomplete
+                                dcc.Dropdown(
+                                    id="location-dropdown",
+                                    options=[], # Options will be populated by callback
+                                    placeholder="Type to search for city or zip code...",
+                                    className="p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500",
+                                    clearable=True,
+                                    searchable=True,
+                                    optionHeight=50 # Adjust height for better readability of long addresses
                                 ),
                             ]
                         ),
-                        html.Button(
-                            "Show on Map",
-                            id="submit-button",
-                            n_clicks=0,
-                            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-md shadow-md transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-                        ),
+                        # The submit button is now effectively replaced by the dropdown selection,
+                        # but we can keep it if we want a separate trigger for the final map plot.
+                        # For now, we'll trigger the map on dropdown selection.
+                        # html.Button(
+                        #     "Show on Map",
+                        #     id="submit-button",
+                        #     n_clicks=0,
+                        #     className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-md shadow-md transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                        # ),
                     ]
                 ),
 
@@ -144,13 +154,57 @@ app.layout = html.Div(
     ]
 )
 
+# Callback to update dropdown options based on user input (autocomplete)
+@app.callback(
+    Output("location-dropdown", "options"),
+    Input("location-dropdown", "search_value") # Use search_value for live typing
+)
+def update_dropdown_options(search_value):
+    if not search_value or len(search_value) < 3: # Require at least 3 characters for search
+        raise PreventUpdate
+
+    print(f"Searching for: {search_value}")
+    
+    options = []
+    # Try geocoding for city/address suggestions
+    try:
+        # Nominatim's geocode with exactly_one=False to get multiple results
+        # limit=3 to get top 3 results
+        locations = geolocator.geocode(search_value, exactly_one=False, limit=3, timeout=5)
+        if locations:
+            for loc in locations:
+                options.append({'label': loc.address, 'value': json.dumps({'address': loc.address, 'lat': loc.latitude, 'lon': loc.longitude})})
+    except (GeocoderTimedOut, GeocoderServiceError) as e:
+        print(f"Geocoding service error for suggestions: {e}")
+    except Exception as e:
+        print(f"An unexpected error occurred during suggestion search: {e}")
+
+    # Add zip code suggestion if it's a digit string
+    if search_value.isdigit() and len(search_value) >= 3 and len(search_value) <= 5:
+        # We don't geocode zips for suggestions, just add the raw zip as an option
+        # This assumes the user will type the full 5 digits before selecting a zip.
+        if len(search_value) == 5:
+             # Check if this zip actually exists in our geojson
+            if us_zip_geojson is None:
+                load_zip_geojson()
+
+            if us_zip_geojson and any(f["properties"].get("ZCTA5CE10") == search_value for f in us_zip_geojson["features"]):
+                options.insert(0, {'label': f"Zip Code: {search_value}", 'value': json.dumps({'zip_code': search_value})})
+            else:
+                options.insert(0, {'label': f"Zip Code: {search_value} (No boundary data)", 'value': json.dumps({'zip_code': search_value})})
+        else: # For partial zip codes
+            options.insert(0, {'label': f"Zip Code: {search_value}", 'value': json.dumps({'zip_code': search_value})})
+
+
+    return options
+
+
 @app.callback(
     Output("map-output", "children"),
-    Input("submit-button", "n_clicks"),
-    State("location-input", "value")
+    Input("location-dropdown", "value") # Trigger when a dropdown option is selected
 )
-def update_map(n_clicks, location_input):
-    if n_clicks == 0 or not location_input:
+def update_map(selected_value_json):
+    if not selected_value_json:
         # Initial map view or no input
         return dcc.Graph(
             figure=px.scatter_mapbox(
@@ -160,14 +214,15 @@ def update_map(n_clicks, location_input):
             ).update_layout(margin={"r":0,"t":50,"l":0,"b":0})
         )
 
+    # Parse the selected value (which is a JSON string)
+    selected_data = json.loads(selected_value_json)
+
     fig = None
-    center_lat, center_lon, zoom_level = 39.8283, -98.5795, 3
+    center_lat, center_lon, zoom_level = 39.8283, -98.5795, 3 # Default US center
 
-    is_zip_code = False
-    if location_input.isdigit() and len(location_input) == 5:
-        is_zip_code = True
-
-    if is_zip_code:
+    if 'zip_code' in selected_data:
+        location_input = selected_data['zip_code']
+        # This part is largely the same as your original zip code handling
         global us_zip_geojson
         if us_zip_geojson is None:
             load_zip_geojson()
@@ -186,13 +241,11 @@ def update_map(n_clicks, location_input):
                 center_lon = float(filtered_features[0]["properties"]["INTPTLON10"])
                 zoom_level = 10
             else:
-                # Fallback for calculating center if centroid properties are missing
                 coords = filtered_features[0]["geometry"]["coordinates"]
                 if filtered_features[0]["geometry"]["type"] == "Polygon":
                     lons = [c[0] for c in coords[0]]
                     lats = [c[1] for c in coords[0]]
                 elif filtered_features[0]["geometry"]["type"] == "MultiPolygon":
-                    # For MultiPolygon, take the first polygon's coordinates
                     lons = [c[0] for c in coords[0][0]]
                     lats = [c[1] for c in coords[0][0]]
                 center_lon = sum(lons) / len(lons)
@@ -208,8 +261,8 @@ def update_map(n_clicks, location_input):
                 zoom=zoom_level,
                 center={"lat": center_lat, "lon": center_lon},
                 opacity=0.5,
-                height=600, # Keep graph height consistent for the dcc.Graph component
-                width=800, # Adjust width for better display
+                height=600,
+                width=800,
                 title=f"Area for Zip Code: {location_input}"
             )
             fig.update_traces(marker_line_width=2, marker_line_color="black")
@@ -219,113 +272,90 @@ def update_map(n_clicks, location_input):
                 mapbox_style="open-street-map",
                 title=f"Zip Code '{location_input}' not found or no boundary data available."
             )
+    elif 'address' in selected_data:
+        full_address = selected_data['address']
+        center_lat = selected_data['lat']
+        center_lon = selected_data['lon']
+        zoom_level = 9 # Default zoom for cities
+
+        # Extract city and state from the full address for GeoJSON lookup
+        address_parts = full_address.split(', ')
+        city_name_from_geocoded = address_parts[0].strip() # Get the first part as potential city name
+
+        state_abbr = None
+        for part in address_parts:
+            if part in STATE_ABBREVIATIONS:
+                state_abbr = STATE_ABBREVIATIONS[part]
+                break
+            elif len(part) == 2 and re.match(r'^[A-Z]{2}$', part):
+                if part in STATE_ABBREVIATIONS.values():
+                    state_abbr = part
+                    break
+        
+        # Clean city name for slug creation
+        city_slug = re.sub(r'[^a-z0-9]+', '_', city_name_from_geocoded.lower()).strip('_')
+        
+        city_geojson_data = {"type": "FeatureCollection", "features": []}
+
+        if state_abbr:
+            city_geojson_data = load_specific_city_geojson(state_abbr.upper(), city_slug)
+            
+            if not city_geojson_data["features"] and not city_slug.endswith("_city"):
+                print(f"Retrying with '_city' suffix for {city_slug}")
+                city_geojson_data = load_specific_city_geojson(state_abbr.upper(), city_slug + "_city")
+            
+            if not city_geojson_data["features"] and city_slug.endswith("_city"):
+                print(f"Retrying by removing '_city' suffix for {city_slug}")
+                city_geojson_data = load_specific_city_geojson(state_abbr.upper(), city_slug[:-len("_city")])
+
+
+        if city_geojson_data and city_geojson_data["features"]:
+            feature_name_in_geojson = city_geojson_data["features"][0]["properties"].get("NAME", city_slug)
+
+            fig = px.choropleth_mapbox(
+                data_frame=pd.DataFrame({'city': [feature_name_in_geojson], 'value': [1]}),
+                geojson=city_geojson_data,
+                locations='city',
+                featureidkey="properties.NAME",
+                color='value',
+                color_discrete_sequence=["green"],
+                mapbox_style="open-street-map",
+                zoom=10,
+                center={"lat": center_lat, "lon": center_lon},
+                opacity=0.6,
+                height=600,
+                width=800,
+                title=f"Boundary for City: {full_address}"
+            )
+            fig.update_traces(marker_line_width=2, marker_line_color="black")
+            
+            fig.add_trace(go.Scattermapbox(
+                lat=[center_lat],
+                lon=[center_lon],
+                mode='markers',
+                marker=go.scattermapbox.Marker(size=10, color='red'),
+                name=f"Geocoded Point: {full_address}"
+            ))
+
+        else:
+            fig = px.scatter_mapbox(
+                lat=[center_lat],
+                lon=[center_lon],
+                zoom=zoom_level,
+                mapbox_style="open-street-map",
+                height=600,
+                width=800,
+                title=f"Location for City: {full_address} (Boundary data not found or available)"
+            )
+            fig.update_traces(marker=dict(size=20, opacity=0.7, symbol="circle", color="red"))
     else:
-        # Handle city input
-        try:
-            location = geolocator.geocode(location_input, timeout=5)
-            if location:
-                center_lat = location.latitude
-                center_lon = location.longitude
-                zoom_level = 9
-
-                address_parts = location.address.split(', ')
-                state_abbr = None
-                for part in address_parts:
-                    if part in STATE_ABBREVIATIONS:
-                        state_abbr = STATE_ABBREVIATIONS[part]
-                        break
-                    elif len(part) == 2 and re.match(r'^[A-Z]{2}$', part):
-                        # Ensure the 2-letter part is a valid state abbreviation
-                        if part in STATE_ABBREVIATIONS.values(): # Check against values (abbrs)
-                            state_abbr = part
-                            break
-                
-                # Clean city name for slug creation
-                city_name_from_input_raw = location_input.split(',')[0].strip()
-                city_slug = re.sub(r'[^a-z0-9]+', '_', city_name_from_input_raw.lower()).strip('_')
-                
-                city_geojson_data = {"type": "FeatureCollection", "features": []} # Initialize as empty
-
-                if state_abbr:
-                    # Attempt to load with original slug
-                    city_geojson_data = load_specific_city_geojson(state_abbr.upper(), city_slug)
-                    
-                    # If no features, try adding "_city" suffix
-                    if not city_geojson_data["features"] and not city_slug.endswith("_city"):
-                        print(f"Retrying with '_city' suffix for {city_slug}")
-                        city_geojson_data = load_specific_city_geojson(state_abbr.upper(), city_slug + "_city")
-                    
-                    # If still no features, try removing "_city" suffix if present (e.g., for New York City)
-                    if not city_geojson_data["features"] and city_slug.endswith("_city"):
-                        print(f"Retrying by removing '_city' suffix for {city_slug}")
-                        city_geojson_data = load_specific_city_geojson(state_abbr.upper(), city_slug[:-len("_city")])
-
-
-                if city_geojson_data and city_geojson_data["features"]:
-                    # Create a simple DataFrame with a dummy value to enable choropleth_mapbox
-                    # We need one row of data that "matches" the single feature in our GeoJSON
-                    city_data_df = pd.DataFrame({'id_col': [city_slug]})
-
-                    # Let's extract the actual name from the GeoJSON's first feature's properties
-                    # to use as the location identifier for Plotly Express
-                    feature_name_in_geojson = city_geojson_data["features"][0]["properties"].get("NAME", city_slug)
-
-                    fig = px.choropleth_mapbox(
-                        data_frame=pd.DataFrame({'city': [feature_name_in_geojson], 'value': [1]}), # Dummy DataFrame
-                        geojson=city_geojson_data,
-                        locations='city', # This column holds the identifier
-                        featureidkey="properties.NAME", # This tells Plotly to match 'city' column with properties.NAME
-                        color='value', # Color based on the dummy value
-                        color_discrete_sequence=["green"],
-                        mapbox_style="open-street-map",
-                        zoom=10, # A closer zoom for specific city boundaries
-                        center={"lat": center_lat, "lon": center_lon},
-                        opacity=0.6,
-                        height=600, # Keep graph height consistent for the dcc.Graph component
-                        width=800,
-                        title=f"Boundary for City: {location.address}"
-                    )
-                    fig.update_traces(marker_line_width=2, marker_line_color="black")
-                    
-                    # Add the geocoded point as a marker for context, if desired
-                    fig.add_trace(go.Scattermapbox(
-                        lat=[center_lat],
-                        lon=[center_lon],
-                        mode='markers',
-                        marker=go.scattermapbox.Marker(size=10, color='red'),
-                        name=f"Geocoded Point: {location.address}"
-                    ))
-
-                else:
-                    # City boundary not found in the repository, fall back to marker
-                    fig = px.scatter_mapbox(
-                        lat=[center_lat],
-                        lon=[center_lon],
-                        zoom=zoom_level,
-                        mapbox_style="open-street-map",
-                        height=600, # Keep graph height consistent for the dcc.Graph component,
-                        width=800,
-                        title=f"Location for City: {location.address} (Boundary data not found or available)"
-                    )
-                    fig.update_traces(marker=dict(size=20, opacity=0.7, symbol="circle", color="red"))
-            else:
-                fig = px.scatter_mapbox(
-                    lat=[center_lat], lon=[center_lon], zoom=3, height=600,
-                    mapbox_style="open-street-map",
-                    title=f"City '{location_input}' not found."
-                )
-        except (GeocoderTimedOut, GeocoderServiceError) as e:
-            fig = px.scatter_mapbox(
-                lat=[center_lat], lon=[center_lon], zoom=3, height=600,
-                mapbox_style="open-street-map",
-                title=f"Geocoding service error for '{location_input}': {e}. Please try again."
-            )
-        except Exception as e:
-            fig = px.scatter_mapbox(
-                lat=[center_lat], lon=[center_lon], zoom=3, height=600,
-                mapbox_style="open-street-map",
-                title=f"An unexpected error occurred for '{location_input}': {e}"
-            )
+        # This case should ideally not be hit if `selected_value_json` always contains zip_code or address
+        # but as a fallback, show a general map.
+        fig = px.scatter_mapbox(
+            lat=[center_lat], lon=[center_lon], zoom=3, height=600,
+            mapbox_style="open-street-map",
+            title="Please select a valid location from the dropdown."
+        )
 
     fig.update_layout(margin={"r":0,"t":50,"l":0,"b":0})
     return dcc.Graph(figure=fig)
