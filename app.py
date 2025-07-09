@@ -4,25 +4,26 @@ import plotly.express as px
 import plotly.graph_objects as go
 import json
 import requests
+import pandas as pd
+# extra libraries for geocoding
 from geopy.geocoders import Nominatim
 from geopy.exc import GeocoderTimedOut, GeocoderServiceError
-import pandas as pd
 import re
-from dash.exceptions import PreventUpdate # Import PreventUpdate
+from dash.exceptions import PreventUpdate 
+#Database import
+import psycopg2
+from shapely.wkb import loads
 
 # Initialize Nominatim geolocator
-# IMPORTANT: Provide a unique and descriptive user_agent for your application
-# This is crucial for respecting Nominatim's usage policy and avoiding blocks.
+# This is used for geocoding city names and addresses (Finding lat/lon for cities)
 geolocator = Nominatim(user_agent="city_zip_explorer_app_v1.0")
 
-# Global variable to store US zip code GeoJSON data
-us_zip_geojson = None
-
-# URLs for GeoJSON data
-ZIP_GEOJSON_URL = "https://raw.githubusercontent.com/ndrezn/zip-code-geojson/master/usa_zip_codes_geo_100m.json"
-CITY_GEOJSON_BASE_URL = "https://raw.githubusercontent.com/generalpiston/geojson-us-city-boundaries/master/cities/"
-
-# State FIPS to abbreviation mapping (expanded for better geocoding results)
+DB_CONFIG = {
+    "host": "localhost",
+    "database": "your_database_name",
+    "user": "your_username",
+    "password": "your_password"
+}
 STATE_ABBREVIATIONS = {
     "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
     "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia",
@@ -47,63 +48,109 @@ STATE_ABBREVIATIONS = {
     "Virginia": "VA", "Washington": "WA", "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY"
 }
 
-# Function to load the US Zip Code GeoJSON data
-def load_zip_geojson():
-    global us_zip_geojson
-    if us_zip_geojson is None:
-        try:
-            print(f"Attempting to load US Zip GeoJSON from: {ZIP_GEOJSON_URL}")
-            response = requests.get(ZIP_GEOJSON_URL)
-            response.raise_for_status()
-            us_zip_geojson = json.loads(response.text)
-            print("US Zip GeoJSON loaded successfully.")
-        except requests.exceptions.RequestException as e:
-            print(f"Error loading US Zip GeoJSON: {e}")
-            us_zip_geojson = {"type": "FeatureCollection", "features": []}
-        except json.JSONDecodeError as e:
-            print(f"Error decoding US Zip GeoJSON: {e}")
-            us_zip_geojson = {"type": "FeatureCollection", "features": []}
-    return us_zip_geojson
-
-# Function to load a specific city's GeoJSON data
-def load_specific_city_geojson(state_abbr, city_slug):
-    city_geojson_url = f"{CITY_GEOJSON_BASE_URL}{state_abbr.lower()}/{city_slug}.json"
+# Function to get a database connection
+def get_db_connection():
     try:
-        print(f"Attempting to load City GeoJSON for {city_slug.replace('_', ' ').title()} in {state_abbr.upper()} from: {city_geojson_url}")
-        response = requests.get(city_geojson_url)
-        response.raise_for_status()
-        city_data = json.loads(response.text)
-        print(f"City GeoJSON for {city_slug.replace('_', ' ').title()} loaded successfully.")
-        return city_data
-    except requests.exceptions.HTTPError as e:
-        print(f"HTTP Error loading city GeoJSON for {city_slug.replace('_', ' ').title()}: {e.response.status_code} - {e.response.reason}. URL: {city_geojson_url}")
-        if e.response.status_code == 404:
-            print(f"File not found for {city_slug.replace('_', ' ').title()} at {city_geojson_url}. It might not exist in the repository.")
+        conn = psycopg2.connect(**DB_CONFIG)
+        return conn
+    except psycopg2.Error as e:
+        print(f"Database connection error: {e}")
+        return None
+    
+# Function to load the US Zip Code GeoJSON data from DB
+def load_zip_geojson_from_db(zip_code=None):
+    conn = get_db_connection()
+    if conn is None:
         return {"type": "FeatureCollection", "features": []}
-    except requests.exceptions.RequestException as e:
-        print(f"Error loading City GeoJSON for {city_slug.replace('_', ' ').title()}: {e}")
+    try:
+        cur = conn.cursor()
+        query = "SELECT zip_code, name, centroid_lat, centroid_lon, ST_AsGeoJSON(geometry) FROM us_zip_codes"
+        params = []
+        if zip_code:
+            query += " WHERE zip_code = %s"
+            params.append(zip_code)
+        
+        cur.execute(query, tuple(params))
+        features = []
+        for row in cur.fetchall():
+            zip_code_db, name, lat, lon, geojson_str = row
+            if geojson_str:
+                feature = {
+                    "type": "Feature",
+                    "geometry": json.loads(geojson_str),
+                    "properties": {
+                        "ZCTA5CE10": zip_code_db,
+                        "NAME10": name,
+                        "INTPTLAT10": str(lat) if lat else None, # Store as string to match original structure
+                        "INTPTLON10": str(lon) if lon else None
+                    }
+                }
+                features.append(feature)
+        
+        return {"type": "FeatureCollection", "features": features}
+
+    except psycopg2.Error as e:
+        print(f"Error querying zip codes from DB: {e}")
         return {"type": "FeatureCollection", "features": []}
-    except json.JSONDecodeError as e:
-        print(f"Error decoding City GeoJSON for {city_slug.replace('_', ' ').title()}: {e}")
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
+
+# Function to load a specific city's GeoJSON data from DB
+def load_specific_city_geojson_from_db(state_abbr, city_slug):
+    conn = get_db_connection()
+    if conn is None:
         return {"type": "FeatureCollection", "features": []}
+
+    try:
+        cur = conn.cursor()
+        query = """
+        SELECT city_name, state_abbr, city_slug, centroid_lat, centroid_lon, ST_AsGeoJSON(geometry)
+        FROM us_cities
+        WHERE state_abbr = %s AND city_slug = %s;
+        """
+        cur.execute(query, (state_abbr.upper(), city_slug))
+        
+        features = []
+        row = cur.fetchone()
+        if row:
+            city_name_db, state_abbr_db, city_slug_db, lat, lon, geojson_str = row
+            if geojson_str:
+                feature = {
+                    "type": "Feature",
+                    "geometry": json.loads(geojson_str),
+                    "properties": {
+                        "NAME": city_name_db,
+                        "STATE_ABBR": state_abbr_db,
+                        "CITY_SLUG": city_slug_db,
+                        "CENTROID_LAT": lat,
+                        "CENTROID_LON": lon
+                    }
+                }
+                features.append(feature)
+        
+        return {"type": "FeatureCollection", "features": features}
+
+    except psycopg2.Error as e:
+        print(f"Error querying city from DB: {e}")
+        return {"type": "FeatureCollection", "features": []}
+    finally:
+        if conn:
+            cur.close()
+            conn.close()
 
 # Initialize the Dash application
 app = dash.Dash(__name__,
                  external_scripts=["https://unpkg.com/@tailwindcss/browser@4"])
-
-# Define the layout
 app.layout = html.Div(
     className="min-h-screen bg-gray-100 p-4 font-inter antialiased flex flex-col items-center",
     children=[
-        # Tailwind CSS and Inter font import
-        html.Script(src="https://cdn.tailwindcss.com"),
         html.Link(href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap", rel="stylesheet"),
-
         html.H1(
             "City/Zip Code Map Explorer",
             className="text-4xl font-bold text-gray-800 mb-6 text-center"
         ),
-        # Main content area: Input/Button section and Map section side-by-side
         html.Div(
             className="flex flex-col lg:flex-row gap-6 w-full max-w-6xl bg-gray-100", # Responsive flex container
             children=[
@@ -115,7 +162,6 @@ app.layout = html.Div(
                             className="flex flex-col",
                             children=[
                                 html.Label("Enter City or Zip Code:", className="text-gray-700 text-lg mb-2"),
-                                # Changed dcc.Input to dcc.Dropdown for autocomplete
                                 dcc.Dropdown(
                                     id="location-dropdown",
                                     options=[], # Options will be populated by callback
@@ -123,30 +169,20 @@ app.layout = html.Div(
                                     className="p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500",
                                     clearable=True,
                                     searchable=True,
-                                    optionHeight=50 # Adjust height for better readability of long addresses
+                                    optionHeight=50
                                 ),
                             ]
                         ),
-                        # The submit button is now effectively replaced by the dropdown selection,
-                        # but we can keep it if we want a separate trigger for the final map plot.
-                        # For now, we'll trigger the map on dropdown selection.
-                        # html.Button(
-                        #     "Show on Map",
-                        #     id="submit-button",
-                        #     n_clicks=0,
-                        #     className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-3 px-6 rounded-md shadow-md transition duration-300 ease-in-out transform hover:scale-105 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-                        # ),
                     ]
                 ),
-
                 # Map output section
                 dcc.Loading(
                     id="loading-map",
                     type="circle",
-                    className="w-full lg:flex-1", # Map container takes remaining space
+                    className="w-full lg:flex-1",
                     children=html.Div(
                         id="map-output",
-                        className="w-full h-[400px] lg:h-[600px] bg-gray-200 rounded-md overflow-hidden shadow-lg" # Adjusted height for smaller map
+                        className="w-full h-[400px] lg:h-[600px] bg-gray-200 rounded-md overflow-hidden shadow-lg" 
                     )
                 )
             ]
@@ -157,19 +193,16 @@ app.layout = html.Div(
 # Callback to update dropdown options based on user input (autocomplete)
 @app.callback(
     Output("location-dropdown", "options"),
-    Input("location-dropdown", "search_value") # Use search_value for live typing
+    Input("location-dropdown", "search_value") 
 )
 def update_dropdown_options(search_value):
-    if not search_value or len(search_value) < 3: # Require at least 3 characters for search
+    if not search_value or len(search_value) < 3:
         raise PreventUpdate
 
-    print(f"Searching for: {search_value}")
-    
     options = []
+    
     # Try geocoding for city/address suggestions
     try:
-        # Nominatim's geocode with exactly_one=False to get multiple results
-        # limit=3 to get top 3 results
         locations = geolocator.geocode(search_value, exactly_one=False, limit=3, timeout=5)
         if locations:
             for loc in locations:
@@ -181,72 +214,72 @@ def update_dropdown_options(search_value):
 
     # Add zip code suggestion if it's a digit string
     if search_value.isdigit() and len(search_value) >= 3 and len(search_value) <= 5:
-        # We don't geocode zips for suggestions, just add the raw zip as an option
-        # This assumes the user will type the full 5 digits before selecting a zip.
         if len(search_value) == 5:
-             # Check if this zip actually exists in our geojson
-            if us_zip_geojson is None:
-                load_zip_geojson()
-
-            if us_zip_geojson and any(f["properties"].get("ZCTA5CE10") == search_value for f in us_zip_geojson["features"]):
-                options.insert(0, {'label': f"Zip Code: {search_value}", 'value': json.dumps({'zip_code': search_value})})
+            # Check if this zip exists in our DB (lighter query than full geojson)
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    cur.execute("SELECT zip_code FROM us_zip_codes WHERE zip_code = %s", (search_value,))
+                    if cur.fetchone():
+                        options.insert(0, {'label': f"Zip Code: {search_value}", 'value': json.dumps({'zip_code': search_value})})
+                    else:
+                        options.insert(0, {'label': f"Zip Code: {search_value} (No boundary data in DB)", 'value': json.dumps({'zip_code': search_value})})
+                except Exception as e:
+                    print(f"DB query error for zip suggestion: {e}")
+                finally:
+                    cur.close()
+                    conn.close()
             else:
-                options.insert(0, {'label': f"Zip Code: {search_value} (No boundary data)", 'value': json.dumps({'zip_code': search_value})})
+                options.insert(0, {'label': f"Zip Code: {search_value} (DB Error - No boundary data)", 'value': json.dumps({'zip_code': search_value})})
         else: # For partial zip codes
             options.insert(0, {'label': f"Zip Code: {search_value}", 'value': json.dumps({'zip_code': search_value})})
-
 
     return options
 
 
+# Callback to load US Zip Code GeoJSON data and make map
 @app.callback(
     Output("map-output", "children"),
     Input("location-dropdown", "value") # Trigger when a dropdown option is selected
 )
 def update_map(selected_value_json):
     if not selected_value_json:
-        # Initial map view or no input
         return dcc.Graph(
             figure=px.scatter_mapbox(
-                lat=[39.8283], lon=[-98.5795], zoom=3, height=600, width=800, # Adjusted height and width for initial view
+                lat=[39.8283], lon=[-98.5795], zoom=3, height=600, width=800,
                 mapbox_style="open-street-map",
                 title="Enter a City or Zip Code to explore the map!"
             ).update_layout(margin={"r":0,"t":50,"l":0,"b":0})
         )
 
-    # Parse the selected value (which is a JSON string)
     selected_data = json.loads(selected_value_json)
-
     fig = None
-    center_lat, center_lon, zoom_level = 39.8283, -98.5795, 3 # Default US center
+    center_lat, center_lon, zoom_level = 39.8283, -98.5795, 3
 
     if 'zip_code' in selected_data:
         location_input = selected_data['zip_code']
-        # This part is largely the same as your original zip code handling
-        global us_zip_geojson
-        if us_zip_geojson is None:
-            load_zip_geojson()
-            if us_zip_geojson is None or not us_zip_geojson["features"]:
-                return html.Div("Error: Could not load US zip code data. Please try again later.", className="text-red-500 text-center mt-4")
+        us_zip_geojson = load_zip_geojson_from_db(location_input) # Load only the specific zip's geojson
 
-        filtered_features = [
-            f for f in us_zip_geojson["features"]
-            if f["properties"].get("ZCTA5CE10") == location_input
-        ]
+        filtered_features = us_zip_geojson["features"] if us_zip_geojson else []
 
         if filtered_features:
             filtered_geojson = {"type": "FeatureCollection", "features": filtered_features}
-            if filtered_features[0]["properties"].get("INTPTLAT10") and filtered_features[0]["properties"].get("INTPTLON10"):
-                center_lat = float(filtered_features[0]["properties"]["INTPTLAT10"])
-                center_lon = float(filtered_features[0]["properties"]["INTPTLON10"])
+            
+            # Prioritize centroids from DB if available
+            first_feature_props = filtered_features[0]["properties"]
+            if first_feature_props.get("INTPTLAT10") and first_feature_props.get("INTPTLON10"):
+                center_lat = float(first_feature_props["INTPTLAT10"])
+                center_lon = float(first_feature_props["INTPTLON10"])
                 zoom_level = 10
-            else:
+            else: # Fallback to calculating centroid from geometry if not in properties
                 coords = filtered_features[0]["geometry"]["coordinates"]
                 if filtered_features[0]["geometry"]["type"] == "Polygon":
                     lons = [c[0] for c in coords[0]]
                     lats = [c[1] for c in coords[0]]
                 elif filtered_features[0]["geometry"]["type"] == "MultiPolygon":
-                    lons = [c[0] for c in coords[0][0]]
+                    # For MultiPolygon, take the first polygon's exterior ring for centroid approximation
+                    lons = [c[0] for c in coords[0][0]] 
                     lats = [c[1] for c in coords[0][0]]
                 center_lon = sum(lons) / len(lons)
                 center_lat = sum(lats) / len(lats)
@@ -276,11 +309,10 @@ def update_map(selected_value_json):
         full_address = selected_data['address']
         center_lat = selected_data['lat']
         center_lon = selected_data['lon']
-        zoom_level = 9 # Default zoom for cities
+        zoom_level = 9
 
-        # Extract city and state from the full address for GeoJSON lookup
         address_parts = full_address.split(', ')
-        city_name_from_geocoded = address_parts[0].strip() # Get the first part as potential city name
+        city_name_from_geocoded = address_parts[0].strip()
 
         state_abbr = None
         for part in address_parts:
@@ -292,21 +324,21 @@ def update_map(selected_value_json):
                     state_abbr = part
                     break
         
-        # Clean city name for slug creation
         city_slug = re.sub(r'[^a-z0-9]+', '_', city_name_from_geocoded.lower()).strip('_')
         
         city_geojson_data = {"type": "FeatureCollection", "features": []}
 
         if state_abbr:
-            city_geojson_data = load_specific_city_geojson(state_abbr.upper(), city_slug)
+            # Try original slug, then with _city suffix, then without _city suffix if present
+            city_geojson_data = load_specific_city_geojson_from_db(state_abbr.upper(), city_slug)
             
             if not city_geojson_data["features"] and not city_slug.endswith("_city"):
                 print(f"Retrying with '_city' suffix for {city_slug}")
-                city_geojson_data = load_specific_city_geojson(state_abbr.upper(), city_slug + "_city")
+                city_geojson_data = load_specific_city_geojson_from_db(state_abbr.upper(), city_slug + "_city")
             
             if not city_geojson_data["features"] and city_slug.endswith("_city"):
                 print(f"Retrying by removing '_city' suffix for {city_slug}")
-                city_geojson_data = load_specific_city_geojson(state_abbr.upper(), city_slug[:-len("_city")])
+                city_geojson_data = load_specific_city_geojson_from_db(state_abbr.upper(), city_slug[:-len("_city")])
 
 
         if city_geojson_data and city_geojson_data["features"]:
@@ -345,12 +377,10 @@ def update_map(selected_value_json):
                 mapbox_style="open-street-map",
                 height=600,
                 width=800,
-                title=f"Location for City: {full_address} (Boundary data not found or available)"
+                title=f"Location for City: {full_address} (Boundary data not found in DB or available)"
             )
             fig.update_traces(marker=dict(size=20, opacity=0.7, symbol="circle", color="red"))
     else:
-        # This case should ideally not be hit if `selected_value_json` always contains zip_code or address
-        # but as a fallback, show a general map.
         fig = px.scatter_mapbox(
             lat=[center_lat], lon=[center_lon], zoom=3, height=600,
             mapbox_style="open-street-map",
@@ -359,9 +389,6 @@ def update_map(selected_value_json):
 
     fig.update_layout(margin={"r":0,"t":50,"l":0,"b":0})
     return dcc.Graph(figure=fig)
-
-# Pre-load the Zip Code GeoJSON data when the script starts.
-load_zip_geojson()
 
 if __name__ == "__main__":
     app.run(debug=True)
