@@ -152,7 +152,7 @@ app.layout = html.Div(
             className="text-4xl font-bold text-gray-800 mb-6 text-center"
         ),
         html.Div(
-            className="flex flex-col lg:flex-row gap-6 w-full max-w-6xl bg-gray-100", # Responsive flex container
+            className="flex flex-col lg:flex-row gap-6 w-full max-w-6xl bg-gray-100", 
             children=[
                 # Input and Button section
                 html.Div(
@@ -241,7 +241,7 @@ def update_dropdown_options(search_value):
 # Callback to load US Zip Code GeoJSON data and make map
 @app.callback(
     Output("map-output", "children"),
-    Input("location-dropdown", "value") # Trigger when a dropdown option is selected
+    Input("location-dropdown", "value")
 )
 def update_map(selected_value_json):
     if not selected_value_json:
@@ -339,7 +339,6 @@ def update_map(selected_value_json):
             if not city_geojson_data["features"] and city_slug.endswith("_city"):
                 print(f"Retrying by removing '_city' suffix for {city_slug}")
                 city_geojson_data = load_specific_city_geojson_from_db(state_abbr.upper(), city_slug[:-len("_city")])
-
 
         if city_geojson_data and city_geojson_data["features"]:
             feature_name_in_geojson = city_geojson_data["features"][0]["properties"].get("NAME", city_slug)
