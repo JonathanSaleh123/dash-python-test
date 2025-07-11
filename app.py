@@ -11,19 +11,13 @@ from geopy.exc import GeocoderTimedOut, GeocoderServiceError
 import re
 from dash.exceptions import PreventUpdate 
 #Database import
-import psycopg2
+from supabase_config import get_supabase_client
 from shapely.wkb import loads
 
 # Initialize Nominatim geolocator
 # This is used for geocoding city names and addresses (Finding lat/lon for cities)
 geolocator = Nominatim(user_agent="city_zip_explorer_app_v1.0")
 
-DB_CONFIG = {
-    "host": "localhost",
-    "database": "your_database_name",
-    "user": "your_username",
-    "password": "your_password"
-}
 STATE_ABBREVIATIONS = {
     "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
     "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia",
@@ -48,40 +42,40 @@ STATE_ABBREVIATIONS = {
     "Virginia": "VA", "Washington": "WA", "West Virginia": "WV", "Wisconsin": "WI", "Wyoming": "WY"
 }
 
-# Function to get a database connection
-def get_db_connection():
-    try:
-        conn = psycopg2.connect(**DB_CONFIG)
-        return conn
-    except psycopg2.Error as e:
-        print(f"Database connection error: {e}")
-        return None
-    
 # Function to load the US Zip Code GeoJSON data from DB
 def load_zip_geojson_from_db(zip_code=None):
-    conn = get_db_connection()
-    if conn is None:
+    supabase = get_supabase_client()
+    if supabase is None:
+        print("Could not get Supabase client. Aborting zip data load.")
         return {"type": "FeatureCollection", "features": []}
     try:
-        cur = conn.cursor()
-        query = "SELECT zip_code, name, centroid_lat, centroid_lon, ST_AsGeoJSON(geometry) FROM us_zip_codes"
-        params = []
+        query = supabase.table('us_zip_codes').select('zip_code, name, centroid_lat, centroid_lon, geometry')
         if zip_code:
-            query += " WHERE zip_code = %s"
-            params.append(zip_code)
+            query = query.eq('zip_code', zip_code)
         
-        cur.execute(query, tuple(params))
+        response = query.execute()
+        data = response.data # Access data directly from the response object
+        
         features = []
-        for row in cur.fetchall():
-            zip_code_db, name, lat, lon, geojson_str = row
-            if geojson_str:
+        for row in data:
+            zip_code_db = row['zip_code']
+            name = row['name']
+            lat = row['centroid_lat']
+            lon = row['centroid_lon']
+            geometry_wkb = row['geometry']
+
+            if geometry_wkb:
+                # Convert WKB to GeoJSON for Plotly
+                shapely_geometry = loads(bytes.fromhex(geometry_wkb))
+                geojson_geometry = shapely_geometry.__geo_interface__
+
                 feature = {
                     "type": "Feature",
-                    "geometry": json.loads(geojson_str),
+                    "geometry": geojson_geometry,
                     "properties": {
                         "ZCTA5CE10": zip_code_db,
                         "NAME10": name,
-                        "INTPTLAT10": str(lat) if lat else None, # Store as string to match original structure
+                        "INTPTLAT10": str(lat) if lat else None,
                         "INTPTLON10": str(lon) if lon else None
                     }
                 }
@@ -89,37 +83,43 @@ def load_zip_geojson_from_db(zip_code=None):
         
         return {"type": "FeatureCollection", "features": features}
 
-    except psycopg2.Error as e:
-        print(f"Error querying zip codes from DB: {e}")
+    except Exception as e:
+        print(f"Error querying zip codes from Supabase: {e}")
         return {"type": "FeatureCollection", "features": []}
-    finally:
-        if conn:
-            cur.close()
-            conn.close()
 
 # Function to load a specific city's GeoJSON data from DB
 def load_specific_city_geojson_from_db(state_abbr, city_slug):
-    conn = get_db_connection()
-    if conn is None:
+    supabase = get_supabase_client()
+    if supabase is None:
+        print("Could not get Supabase client. Aborting city data load.")
         return {"type": "FeatureCollection", "features": []}
 
     try:
-        cur = conn.cursor()
-        query = """
-        SELECT city_name, state_abbr, city_slug, centroid_lat, centroid_lon, ST_AsGeoJSON(geometry)
-        FROM us_cities
-        WHERE state_abbr = %s AND city_slug = %s;
-        """
-        cur.execute(query, (state_abbr.upper(), city_slug))
+        response = supabase.table('us_cities').select('city_name, state_abbr, city_slug, centroid_lat, centroid_lon, geometry') \
+            .eq('state_abbr', state_abbr.upper()) \
+            .eq('city_slug', city_slug) \
+            .limit(1) \
+            .execute()
+        
+        data = response.data
         
         features = []
-        row = cur.fetchone()
-        if row:
-            city_name_db, state_abbr_db, city_slug_db, lat, lon, geojson_str = row
-            if geojson_str:
+        if data:
+            row = data[0]
+            city_name_db = row['city_name']
+            state_abbr_db = row['state_abbr']
+            city_slug_db = row['city_slug']
+            lat = row['centroid_lat']
+            lon = row['centroid_lon']
+            geometry_wkb = row['geometry']
+
+            if geometry_wkb:
+                shapely_geometry = loads(bytes.fromhex(geometry_wkb))
+                geojson_geometry = shapely_geometry.__geo_interface__
+
                 feature = {
                     "type": "Feature",
-                    "geometry": json.loads(geojson_str),
+                    "geometry": geojson_geometry,
                     "properties": {
                         "NAME": city_name_db,
                         "STATE_ABBR": state_abbr_db,
@@ -132,13 +132,9 @@ def load_specific_city_geojson_from_db(state_abbr, city_slug):
         
         return {"type": "FeatureCollection", "features": features}
 
-    except psycopg2.Error as e:
-        print(f"Error querying city from DB: {e}")
+    except Exception as e:
+        print(f"Error querying city from Supabase: {e}")
         return {"type": "FeatureCollection", "features": []}
-    finally:
-        if conn:
-            cur.close()
-            conn.close()
 
 # Initialize the Dash application
 app = dash.Dash(__name__,
@@ -216,22 +212,18 @@ def update_dropdown_options(search_value):
     if search_value.isdigit() and len(search_value) >= 3 and len(search_value) <= 5:
         if len(search_value) == 5:
             # Check if this zip exists in our DB (lighter query than full geojson)
-            conn = get_db_connection()
-            if conn:
+            supabase = get_supabase_client()
+            if supabase:
                 try:
-                    cur = conn.cursor()
-                    cur.execute("SELECT zip_code FROM us_zip_codes WHERE zip_code = %s", (search_value,))
-                    if cur.fetchone():
+                    query = supabase.table('us_zip_codes').select('zip_code').eq('zip_code', search_value)
+                    if query.execute().data:
                         options.insert(0, {'label': f"Zip Code: {search_value}", 'value': json.dumps({'zip_code': search_value})})
                     else:
                         options.insert(0, {'label': f"Zip Code: {search_value} (No boundary data in DB)", 'value': json.dumps({'zip_code': search_value})})
                 except Exception as e:
-                    print(f"DB query error for zip suggestion: {e}")
-                finally:
-                    cur.close()
-                    conn.close()
+                    print(f"Supabase query error for zip suggestion: {e}")
             else:
-                options.insert(0, {'label': f"Zip Code: {search_value} (DB Error - No boundary data)", 'value': json.dumps({'zip_code': search_value})})
+                options.insert(0, {'label': f"Zip Code: {search_value} (Supabase Error - No boundary data)", 'value': json.dumps({'zip_code': search_value})})
         else: # For partial zip codes
             options.insert(0, {'label': f"Zip Code: {search_value}", 'value': json.dumps({'zip_code': search_value})})
 
